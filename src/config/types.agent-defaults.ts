@@ -157,6 +157,15 @@ export type CliBackendConfig = {
   };
 };
 
+export type IdleAutoCompactConfig = {
+  enabled?: boolean;
+  contextThresholdRatio?: number;
+  idleMinutes?: number;
+  cooldownMinutes?: number;
+  maxQueueDepth?: number;
+  scanEveryMinutes?: number;
+};
+
 export type AgentDefaultsConfig = {
   /** Global default provider params applied to all models before per-model and per-agent overrides. */
   params?: Record<string, unknown>;
@@ -454,6 +463,7 @@ export type AgentCompactionConfig = {
    * Default: false (silent by default).
    */
   notifyUser?: boolean;
+  idleAutoCompact?: IdleAutoCompactConfig;
 };
 
 export type AgentCompactionMemoryFlushConfig = {

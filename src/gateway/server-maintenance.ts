@@ -1,8 +1,14 @@
 import type { HealthSummary } from "../commands/health.js";
+import type { OpenClawConfig } from "../config/config.js";
 import { sweepStaleRunContexts } from "../infra/agent-events.js";
 import { cleanOldMedia } from "../media/store.js";
+import { getQueueSize } from "../process/command-queue.js";
 import { abortChatRunById, type ChatAbortControllerEntry } from "./chat-abort.js";
 import { pruneStaleControlPlaneBuckets } from "./control-plane-rate-limit.js";
+import {
+  runIdleAutoCompactSweepDetailed,
+  summarizeIdleAutoCompactDecisions,
+} from "./idle-auto-compact.js";
 import type { ChatRunEntry } from "./server-chat.js";
 import {
   DEDUPE_MAX,
@@ -42,11 +48,13 @@ export function startGatewayMaintenanceTimers(params: {
   agentRunSeq: Map<string, number>;
   nodeSendToSession: (sessionKey: string, event: string, payload: unknown) => void;
   mediaCleanupTtlMs?: number;
+  cfg?: OpenClawConfig;
 }): {
   tickInterval: ReturnType<typeof setInterval>;
   healthInterval: ReturnType<typeof setInterval>;
   dedupeCleanup: ReturnType<typeof setInterval>;
   mediaCleanup: ReturnType<typeof setInterval> | null;
+  idleAutoCompactCleanup: ReturnType<typeof setInterval> | null;
 } {
   setBroadcastHealthUpdate((snap: HealthSummary) => {
     params.broadcast("health", snap, {
@@ -61,7 +69,7 @@ export function startGatewayMaintenanceTimers(params: {
   // periodic keepalive
   const tickInterval = setInterval(() => {
     const payload = { ts: Date.now() };
-    params.broadcast("tick", payload);
+    params.broadcast("tick", payload, { dropIfSlow: true });
     params.nodeSendToAllSubscribed("tick", payload);
   }, TICK_INTERVAL_MS);
 
@@ -161,8 +169,52 @@ export function startGatewayMaintenanceTimers(params: {
     sweepStaleRunContexts();
   }, 60_000);
 
+  let idleAutoCompactInterval: ReturnType<typeof setInterval> | null = null;
+  const idleAutoCompactPolicy = params.cfg
+    ? params.cfg.agents?.defaults?.compaction?.idleAutoCompact
+    : undefined;
+  if (params.cfg && idleAutoCompactPolicy?.enabled === true) {
+    let idleAutoCompactInFlight: Promise<void> | null = null;
+    const runIdleAutoCompact = () => {
+      if (idleAutoCompactInFlight) {
+        return idleAutoCompactInFlight;
+      }
+      idleAutoCompactInFlight = runIdleAutoCompactSweepDetailed({
+        cfg: params.cfg!,
+        getQueueSize,
+      })
+        .then((result) => {
+          const summary = summarizeIdleAutoCompactDecisions(result.decisions);
+          if (result.compacted > 0 || Object.keys(summary).length > 0) {
+            params.logHealth.error(
+              `idle auto-compact sweep: compacted=${result.compacted} decisions=${JSON.stringify(summary)}`,
+            );
+          }
+        })
+        .catch((err) => {
+          params.logHealth.error(`idle auto-compact sweep failed: ${formatError(err)}`);
+        })
+        .finally(() => {
+          idleAutoCompactInFlight = null;
+        });
+      return idleAutoCompactInFlight;
+    };
+    idleAutoCompactInterval = setInterval(
+      () => {
+        void runIdleAutoCompact();
+      },
+      Math.max(1, idleAutoCompactPolicy.scanEveryMinutes ?? 5) * 60_000,
+    );
+  }
+
   if (typeof params.mediaCleanupTtlMs !== "number") {
-    return { tickInterval, healthInterval, dedupeCleanup, mediaCleanup: null };
+    return {
+      tickInterval,
+      healthInterval,
+      dedupeCleanup,
+      mediaCleanup: null,
+      idleAutoCompactCleanup: idleAutoCompactInterval,
+    };
   }
 
   let mediaCleanupInFlight: Promise<void> | null = null;
@@ -189,5 +241,11 @@ export function startGatewayMaintenanceTimers(params: {
 
   void runMediaCleanup();
 
-  return { tickInterval, healthInterval, dedupeCleanup, mediaCleanup };
+  return {
+    tickInterval,
+    healthInterval,
+    dedupeCleanup,
+    mediaCleanup,
+    idleAutoCompactCleanup: idleAutoCompactInterval,
+  };
 }

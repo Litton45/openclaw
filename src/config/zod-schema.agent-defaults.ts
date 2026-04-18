@@ -176,6 +176,17 @@ export const AgentDefaultsSchema = z
           .strict()
           .optional(),
         notifyUser: z.boolean().optional(),
+        idleAutoCompact: z
+          .object({
+            enabled: z.boolean().optional(),
+            contextThresholdRatio: z.number().min(0.5).max(0.95).optional(),
+            idleMinutes: z.number().int().nonnegative().optional(),
+            cooldownMinutes: z.number().int().nonnegative().optional(),
+            maxQueueDepth: z.number().int().nonnegative().optional(),
+            scanEveryMinutes: z.number().int().positive().optional(),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .optional(),
